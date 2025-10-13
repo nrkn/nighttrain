@@ -26,7 +26,7 @@ public class NightTrainMod : Script
         var startupSound = new StartupSoundSystem();
         var death = new DeathSystem(config.General, Restart);
         var train = new TrainSystem(config.General);
-        var progress = new PathProgressSystem(_trainPath, () => train.Engine, (int m) => { });
+        var progress = new PathProgressSystem(_trainPath, () => train.Engine, OnMarker);
         var progressHud = new ProgressHudSystem(config.ProgressHud, progress);
 
         _subsystems.Add(startupSound);
@@ -58,6 +58,15 @@ public class NightTrainMod : Script
         Interval = 0;
 
         Notification.PostTicker("~p~Night Train~s~ loaded (F5 to start, F6 to stop).", true);
+    }
+
+    void OnMarker(int mark) {
+        // win condition - we will make it fancy later, eg spawn some peds to cheer, fireworks etc
+        if (mark == _trainPath.Positions.Count - 1) {
+            Notification.PostTicker("YOU WIN!", true);
+        }
+
+        // various decisions about spawning impending scenarios to go here
     }
 
     void Restart()
