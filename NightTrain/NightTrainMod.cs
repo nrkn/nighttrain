@@ -427,8 +427,8 @@ public class DebugPathViewerSystem : ModSubsystemBase
 {
     private readonly TrainPath _trainPath;
     private readonly PathProgressSystem _progress;
-        
-    public DebugPathViewerSystem(TrainPath trainPath, PathProgressSystem progress )
+
+    public DebugPathViewerSystem(TrainPath trainPath, PathProgressSystem progress)
     {
         _trainPath = trainPath;
         _progress = progress;
@@ -443,7 +443,7 @@ public class DebugPathViewerSystem : ModSubsystemBase
         int center = _progress.NextIndex;
 
         if (center < 0) return;
-        
+
         int start = Math.Max(0, center - TrainPath.PathWindowBehind);
         int end = Math.Min(positions.Count - 1, center + TrainPath.PathWindowAhead);
 
@@ -680,7 +680,7 @@ public class ProgressHudSystem : ModSubsystemBase
     private readonly PathProgressSystem _progress;
 
 
-    public ProgressHudSystem(ProgressHudConfig cfg, PathProgressSystem progress )
+    public ProgressHudSystem(ProgressHudConfig cfg, PathProgressSystem progress)
     {
         _fontScale = cfg.FontScale;
         _posX = cfg.PosX;
@@ -709,7 +709,7 @@ public class ProgressHudSystem : ModSubsystemBase
     {
         if (_el == null)
         {
-            _el = new TextElement(text, new PointF(x, y), scale, Color.White, GTA.UI.Font.ChaletLondon, Alignment.Left, shadow, true )
+            _el = new TextElement(text, new PointF(x, y), scale, Color.White, GTA.UI.Font.ChaletLondon, Alignment.Left, shadow, true)
             {
                 Enabled = true
             };
@@ -792,22 +792,21 @@ public class TrainPath
     }
 }
 
-
 public class PathProgressSystem : ModSubsystemBase
 {
-    private const float PointEpsilon = 0.25f; // meters: within this we consider "on" a marker
+    private const float PointEpsilon = 0.25f;
     private readonly TrainPath _trainPath;
     private readonly Func<Entity> _getTarget;
-    private readonly Action<int> _onMarker; // prefer Action<int> so we can pass the index we hit
+    private readonly Action<int> _onMarker;
 
     public int PreviousIndex { get; private set; }
     public int NextIndex { get; private set; }
-    /// <summary>
-    /// Parametric distance along the current segment [0,1).
-    /// 0 means exactly at _positions[PreviousIndex], approaching NextIndex.
-    /// </summary>
     public float Distance { get; private set; }
     public int Length { get; private set; }
+
+    // NEW: support looped paths
+    private readonly bool _loop = true; // or pass via ctor/config if you want
+    public int LapsCompleted { get; private set; } = 0;
 
     public PathProgressSystem(TrainPath trainPath, Func<Entity> getTarget, Action<int> onMarker)
     {
@@ -819,22 +818,19 @@ public class PathProgressSystem : ModSubsystemBase
     public void FirstTick()
     {
         var target = _getTarget?.Invoke();
-        if (target == null || !target.Exists())
-        {
-            return;
-        }
+        if (target == null || !target.Exists()) return;
 
         if (_trainPath.Positions.Count < 2)
             throw new InvalidOperationException("Path must contain at least 2 points.");
 
-        // Start at the first segment and advance until the target projects into [0,1)
+        Length = _trainPath.Positions.Count;
+
         PreviousIndex = 0;
         NextIndex = 1;
         Distance = 0f;
+        LapsCompleted = 0;
 
-        Length = _trainPath.Positions.Count;
-
-        // In case the entity spawns somewhere down the line, walk forward once at startup.
+        // Snap to wherever the train actually is
         SnapForwardToSegmentContaining(target.Position, emitMarkers: false);
 
         _firstTime = false;
@@ -845,42 +841,52 @@ public class PathProgressSystem : ModSubsystemBase
         PreviousIndex = 0;
         NextIndex = 0;
         Distance = 0f;
+
+        // IMPORTANT: ensure we re-init on next Start
+        _firstTime = true;
+        LapsCompleted = 0;
     }
 
     private bool _firstTime = true;
 
     public override void Tick()
     {
-        if (_firstTime) {
-            FirstTick();
-        }
+        if (_firstTime) FirstTick();
 
         if (_trainPath.Positions.Count < 2) return;
 
         var target = _getTarget?.Invoke();
         if (target == null || !target.Exists()) return;
 
-        var pos = target.Position;
-
-        // Advance through as many segments as necessary to catch up with the entity.
-        // Emit OnMarker for each marker we pass/land on.
-        SnapForwardToSegmentContaining(pos, emitMarkers: true);
+        SnapForwardToSegmentContaining(target.Position, emitMarkers: true);
     }
-
-    // ---- internal mechanics -------------------------------------------------
 
     private void SnapForwardToSegmentContaining(Vector3 worldPos, bool emitMarkers)
     {
-        // Clamp to the last segment if we’re already at/after the end.
+        int count = _trainPath.Positions.Count;
+
         while (true)
         {
-            if (NextIndex >= _trainPath.Positions.Count)
+            // --- Handle wrapping/clamping at the end ---
+            if (NextIndex >= count)
             {
-                // we are past the last point; pin to the last segment end
-                PreviousIndex = _trainPath.Positions.Count - 2;
-                NextIndex = _trainPath.Positions.Count - 1;
-                Distance = 1f - float.Epsilon; // "at end"
-                return;
+                if (_loop)
+                {
+                    // We just finished the last marker in the previous step -> new lap
+                    LapsCompleted++;
+                    PreviousIndex = count - 1;
+                    NextIndex = 0;
+                    Distance = 0f;
+                    // continue to evaluate the last->first segment
+                }
+                else
+                {
+                    // Non-loop: clamp at end
+                    PreviousIndex = count - 2;
+                    NextIndex = count - 1;
+                    Distance = 1f - float.Epsilon;
+                    return;
+                }
             }
 
             var a = AsV3(_trainPath.Positions[PreviousIndex]);
@@ -890,41 +896,33 @@ public class PathProgressSystem : ModSubsystemBase
             float segLenSq = seg.LengthSquared();
             if (segLenSq < 1e-6f)
             {
-                // Degenerate segment (duplicate markers). Treat as instant pass.
                 if (emitMarkers) _onMarker(NextIndex);
-                PreviousIndex++;
-                NextIndex++;
+                PreviousIndex = NextIndex;
+                NextIndex = NextIndex + 1; // may wrap at top of loop
                 Distance = 0f;
                 continue;
             }
 
-            // Project entity onto the current segment
             float t = Vector3.Dot(worldPos - a, seg) / segLenSq;
 
-            // If we're clearly before 'a' (can happen at Start()), stay on this segment.
             if (t < 0f)
             {
                 Distance = 0f;
-                // If we’re actually *on* marker 'a', let caller decide if that counts;
-                // we don't emit here to avoid double-emitting at 0 unless we crossed it.
                 return;
             }
 
-            // If we’re at/after 'b', we have passed marker NextIndex: emit and advance.
-            // Also treat being within PointEpsilon of 'b' as a pass even if projection < 1.
             var closest = a + seg * MathUtil.Clamp(t, 0f, 1f);
             bool withinPoint = (closest - b).Length() <= PointEpsilon;
 
             if (t >= 1f || withinPoint)
             {
                 if (emitMarkers) _onMarker(NextIndex);
-                PreviousIndex++;
-                NextIndex++;
-                Distance = 0f; // will recompute on the next loop
+                PreviousIndex = NextIndex;
+                NextIndex = NextIndex + 1; // may wrap at top of loop
+                Distance = 0f;
                 continue;
             }
 
-            // We are between a and b: lock in Distance in [0,1)
             Distance = MathUtil.Clamp(t, 0f, 1f - float.Epsilon);
             return;
         }
