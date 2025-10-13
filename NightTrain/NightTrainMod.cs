@@ -647,6 +647,7 @@ public class TrainSystem : ModSubsystemBase
     }
 }
 
+// broken - we are going to replace with a system that keeps track of the position on the path for us
 public class ProgressHudSystem : ModSubsystemBase
 {
     private readonly Entity _target;
