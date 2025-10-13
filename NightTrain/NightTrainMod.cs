@@ -26,10 +26,15 @@ public class NightTrainMod : Script
         var startupSound = new StartupSoundSystem();
         var death = new DeathSystem(config.General, Restart);
         var train = new TrainSystem(config.General);
+        var progress = new PathProgressSystem(_trainPath, () => train.Engine, (int m) => { });
+        var progressHud = new ProgressHudSystem(config.ProgressHud, progress);
 
         _subsystems.Add(startupSound);
         _subsystems.Add(death);
         _subsystems.Add(train);
+        _subsystems.Add(progress);
+        _subsystems.Add(progressHud);
+
 
         if (config.General.RecordPath)
         {
@@ -40,16 +45,13 @@ public class NightTrainMod : Script
 
         if (config.General.ShowPath)
         {
-            var debugPathViewer = new DebugPathViewerSystem(_trainPath, train.Engine);
+            var debugPathViewer = new DebugPathViewerSystem(_trainPath, progress);
 
             _subsystems.Add(debugPathViewer);
 
             Notification.PostTicker("Showing Debug Path", true);
         }
-        else
-        {
-            Notification.PostTicker("Debug Path Hidden", true);
-        }
+
 
         KeyUp += OnKeyUp;
         Tick += OnTick;
@@ -99,12 +101,12 @@ public class NightTrainMod : Script
 
     private void Start()
     {
-        _isRunning = true;
-
         foreach (var sys in _subsystems)
         {
             sys.Start();
         }
+
+        _isRunning = true;
     }
 
     private void Stop()
@@ -266,10 +268,12 @@ public class StartupSoundSystem : ModSubsystemBase
 
 public class RecordPathSystem : ModSubsystemBase
 {
-    private const int SampleEveryMs = 500;
+    private const int SampleEveryMs = 500;              // keep time-based sampling
     private const float LoopDistanceThreshold = 3.0f;   // meters
     private const float LoopHeadingTolerance = 15.0f;   // degrees (0..180)
-    private const int MinSamplesBeforeLoop = 50;      // avoid early accidental stop
+    private const int MinSamplesBeforeLoop = 50;
+
+    private enum RecordingState { Idle, Warmup, Recording, Done }
 
     private Vector3 _startPosition;
     private readonly float _startHeading;
@@ -278,7 +282,9 @@ public class RecordPathSystem : ModSubsystemBase
     private readonly string _filename;
 
     private int _nextSampleAt = 0;
-    private bool _recorderArmed = false;
+    private RecordingState _state = RecordingState.Idle;
+    private bool _inGate = false;   // for edge detection
+    private int _gatePasses = 0;
 
     public RecordPathSystem(GeneralConfig cfg, Entity target)
     {
@@ -291,26 +297,80 @@ public class RecordPathSystem : ModSubsystemBase
     public override void Start()
     {
         _path.Clear();
-        _nextSampleAt = Game.GameTime; // sample immediately
-        _recorderArmed = true;
+        _nextSampleAt = Game.GameTime; // sample immediately (once recording)
+        _state = RecordingState.Warmup; // ← start with a warmup lap
+        _inGate = false;
+        _gatePasses = 0;
     }
 
     public override void Stop()
     {
-        _recorderArmed = false;
+        _state = RecordingState.Idle;
         _path.Clear();
+        _inGate = false;
+        _gatePasses = 0;
     }
 
     public override void Tick()
     {
-        if (_recorderArmed)
-        {
-            MaybeSamplePath();
-            MaybeAutoStopOnLoop();
-        }
+        if (_state == RecordingState.Idle || _state == RecordingState.Done) return;
+
+        // detect gate crossings and transition state
+        UpdateGateStateAndMaybeAdvance();
+
+        // only sample during the Recording state
+        if (_state == RecordingState.Recording)
+            MaybeSamplePathTimeBased();
     }
 
-    private void MaybeSamplePath()
+    private void UpdateGateStateAndMaybeAdvance()
+    {
+        Entity target = (_target != null && _target.Exists())
+            ? _target
+            : Game.Player.Character;
+
+        var now = target.Position;
+        float hNow = target.Heading;
+
+        bool withinGate =
+            now.DistanceTo(_startPosition) <= LoopDistanceThreshold &&
+            HeadingDeltaDegrees(hNow, _startHeading) <= LoopHeadingTolerance;
+
+        // Rising edge: outside → inside
+        if (withinGate && !_inGate)
+        {
+            _gatePasses++;
+
+            if (_state == RecordingState.Warmup && _gatePasses == 1)
+            {
+                // Begin recording on pass #1
+                _state = RecordingState.Recording;
+                _path.Clear();
+                _nextSampleAt = Game.GameTime; // start sampling immediately
+                Notification.PostTicker("~p~Night Train~s~ recording started.", true);
+            }
+            else if (_state == RecordingState.Recording && _gatePasses == 2)
+            {
+                // Completed one full recorded lap; save & stop on pass #2
+                if (_path.Count >= MinSamplesBeforeLoop)
+                {
+                    WritePath();
+                    Notification.PostTicker("~p~Night Train~s~ path saved.", true);
+                }
+                else
+                {
+                    Notification.PostTicker("~y~Night Train~s~ recording aborted (too few samples).", true);
+                }
+
+                _state = RecordingState.Done;
+                _path.Clear();
+            }
+        }
+
+        _inGate = withinGate; // update for edge detection
+    }
+
+    private void MaybeSamplePathTimeBased()
     {
         if (Game.GameTime < _nextSampleAt) return;
         _nextSampleAt = Game.GameTime + SampleEveryMs;
@@ -320,32 +380,9 @@ public class RecordPathSystem : ModSubsystemBase
             : Game.Player.Character;
 
         var p = target.Position;
-        float h = target.Heading; // 0..360
+        float h = target.Heading;
 
         _path.Add(new Vector4(p.X, p.Y, p.Z, h));
-    }
-
-    private void MaybeAutoStopOnLoop()
-    {
-        if (_path.Count < MinSamplesBeforeLoop) return;
-
-        Entity target = (_target != null && _target.Exists())
-            ? _target
-            : Game.Player.Character;
-
-        var now = target.Position;
-        float hNow = target.Heading;
-
-        float dist = now.DistanceTo(_startPosition);
-        float dh = HeadingDeltaDegrees(hNow, _startHeading);
-
-        if (dist <= LoopDistanceThreshold && dh <= LoopHeadingTolerance)
-        {
-            WritePath();
-            _path.Clear();
-            _recorderArmed = false;
-            Notification.PostTicker("~p~Night Train~s~ path saved.", true);
-        }
     }
 
     private static float HeadingDeltaDegrees(float a, float b)
@@ -364,7 +401,6 @@ public class RecordPathSystem : ModSubsystemBase
 
             using (var sw = new System.IO.StreamWriter(fullPath, false, System.Text.Encoding.UTF8))
             {
-                // x y z h (space-separated), one sample per line
                 var ci = System.Globalization.CultureInfo.InvariantCulture;
                 foreach (var v in _path)
                     sw.WriteLine(string.Format(ci, "{0} {1} {2} {3}", v.X, v.Y, v.Z, v.W));
@@ -390,37 +426,24 @@ public class RecordPathSystem : ModSubsystemBase
 public class DebugPathViewerSystem : ModSubsystemBase
 {
     private readonly TrainPath _trainPath;
-    private readonly Entity _target;
-
-    private int _nearestPathIdx = -1;
-
-    public DebugPathViewerSystem(TrainPath trainPath, Entity target)
+    private readonly PathProgressSystem _progress;
+        
+    public DebugPathViewerSystem(TrainPath trainPath, PathProgressSystem progress )
     {
         _trainPath = trainPath;
-        _target = target;
+        _progress = progress;
     }
 
     public override void Tick()
-    {
-        DrawPathMarkersWindowed();
-    }
-
-    private void DrawPathMarkersWindowed()
     {
         var positions = _trainPath.Positions;
 
         if (positions.Count == 0) return;
 
-        // Use engine if alive, else player
-        Entity target = (_target != null && _target.Exists())
-            ? _target
-            : Game.Player.Character;
+        int center = _progress.NextIndex;
 
-        int center = _trainPath.FindNearestPathIndex(target.Position, _nearestPathIdx);
         if (center < 0) return;
-
-        _nearestPathIdx = center;
-
+        
         int start = Math.Max(0, center - TrainPath.PathWindowBehind);
         int end = Math.Min(positions.Count - 1, center + TrainPath.PathWindowAhead);
 
@@ -597,7 +620,7 @@ public class TrainSystem : ModSubsystemBase
         // Initial speed (mph?)
         Function.Call(Hash.SET_TRAIN_CRUISE_SPEED, Engine.Handle, _startSpeed);
 
-        Notification.PostTicker("~g~Train ready", true);
+        Notification.PostTicker($"~g~Train ready: ${ Engine.Handle }", true);
     }
 
     private void HardenTrainEntity(Entity e)
@@ -650,73 +673,31 @@ public class TrainSystem : ModSubsystemBase
 // broken - we are going to replace with a system that keeps track of the position on the path for us
 public class ProgressHudSystem : ModSubsystemBase
 {
-    private readonly Entity _target;
-
     private readonly bool _useShadow;
     private readonly float _fontScale;
     private readonly int _posX;
     private readonly int _posY;
+    private readonly PathProgressSystem _progress;
 
-    private readonly TrainPath _path;
 
-    private int _bestIdx = -1;
-
-    // allow tiny backtracks (meters) before we decrement best
-    private const float BacktrackMetersTolerance = 6f;
-
-    public ProgressHudSystem(ProgressHudConfig cfg, TrainPath path, Entity target)
+    public ProgressHudSystem(ProgressHudConfig cfg, PathProgressSystem progress )
     {
         _fontScale = cfg.FontScale;
         _posX = cfg.PosX;
         _posY = cfg.PosY;
         _useShadow = cfg.UseShadow;
-        _path = path;
-        _target = target;
+        _progress = progress;
     }
 
     public override void Start()
     {
-        _bestIdx = -1;
-
-        Notification.PostTicker($"Progress HUD: ~g~{_path.Positions.Count}~s~ points.", true);
-    }
-
-    public override void Stop()
-    {
-        _bestIdx = -1;
+        Notification.PostTicker($"Progress HUD: ~g~{_progress.Length}~s~ points.", true);
     }
 
     public override void Tick()
     {
-        var positions = _path.Positions;
-
-        if (positions.Count == 0) return;
-
-        var ent = (_target != null && _target.Exists()) ? _target : Game.Player.Character;
-        var pos = ent.Position;
-
-        int idx = _path.FindNearestPathIndex(pos, _bestIdx);
-        if (idx < 0) return;
-
-        // monotonic progress with small backtrack tolerance
-        if (_bestIdx < 0) _bestIdx = idx;
-        else
-        {
-            if (idx >= _bestIdx) _bestIdx = idx;
-            else
-            {
-                // only reduce if we've clearly moved backwards along path
-                // compute world distance between current sample and best sample
-                var a = positions[_bestIdx];
-                var b = positions[idx];
-                float dx = a.X - b.X, dy = a.Y - b.Y, dz = a.Z - b.Z;
-                float dist = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                if (dist > BacktrackMetersTolerance) _bestIdx = idx;
-            }
-        }
-
-        int total = positions.Count;
-        int n = Math.Min(_bestIdx + 1, total); // 1-based for display
+        int total = _progress.Length;
+        int n = Math.Min(_progress.PreviousIndex + 1, total); // 1-based for display
         float pct = (total > 0) ? (100f * n / total) : 0f;
 
         DrawText($"{n}/{total}  ({pct:0.0}%)", _posX, _posY, _fontScale, _useShadow);
@@ -726,11 +707,9 @@ public class ProgressHudSystem : ModSubsystemBase
 
     private void DrawText(string text, int x, int y, float scale, bool shadow)
     {
-        if (shadow) Function.Call(Hash.SET_TEXT_DROP_SHADOW);
-
         if (_el == null)
         {
-            _el = new TextElement(text, new PointF(x, y), scale)
+            _el = new TextElement(text, new PointF(x, y), scale, Color.White, GTA.UI.Font.ChaletLondon, Alignment.Left, shadow, true )
             {
                 Enabled = true
             };
@@ -739,7 +718,6 @@ public class ProgressHudSystem : ModSubsystemBase
         {
             _el.Caption = text;
         }
-
 
         _el.Draw();
     }
@@ -812,44 +790,151 @@ public class TrainPath
             return false;
         }
     }
+}
 
-    public int FindNearestPathIndex(Vector3 pos, int _nearestPathIdx = -1)
+
+public class PathProgressSystem : ModSubsystemBase
+{
+    private const float PointEpsilon = 0.25f; // meters: within this we consider "on" a marker
+    private readonly TrainPath _trainPath;
+    private readonly Func<Entity> _getTarget;
+    private readonly Action<int> _onMarker; // prefer Action<int> so we can pass the index we hit
+
+    public int PreviousIndex { get; private set; }
+    public int NextIndex { get; private set; }
+    /// <summary>
+    /// Parametric distance along the current segment [0,1).
+    /// 0 means exactly at _positions[PreviousIndex], approaching NextIndex.
+    /// </summary>
+    public float Distance { get; private set; }
+    public int Length { get; private set; }
+
+    public PathProgressSystem(TrainPath trainPath, Func<Entity> getTarget, Action<int> onMarker)
     {
-        if (Positions.Count == 0) return -1;
+        _trainPath = trainPath;
+        _getTarget = getTarget;
+        _onMarker = onMarker;
+    }
 
-        // Search locally around the last best index to keep it cheap.
-        int searchStart, searchEnd;
-        if (_nearestPathIdx < 0)
+    public void FirstTick()
+    {
+        var target = _getTarget?.Invoke();
+        if (target == null || !target.Exists())
         {
-            // First time: full scan (fine for a few hundred points)
-            searchStart = 0;
-            searchEnd = Positions.Count - 1;
-        }
-        else
-        {
-            // Subsequent frames: search a band around the last best
-            int band = (PathWindowBehind + PathWindowAhead) * 2 + 20; // generous band
-            searchStart = Math.Max(0, _nearestPathIdx - band);
-            searchEnd = Math.Min(Positions.Count - 1, _nearestPathIdx + band);
+            return;
         }
 
-        int bestIdx = Math.Max(0, _nearestPathIdx);
-        float bestDist2 = float.MaxValue;
+        if (_trainPath.Positions.Count < 2)
+            throw new InvalidOperationException("Path must contain at least 2 points.");
 
-        for (int i = searchStart; i <= searchEnd; i++)
+        // Start at the first segment and advance until the target projects into [0,1)
+        PreviousIndex = 0;
+        NextIndex = 1;
+        Distance = 0f;
+
+        Length = _trainPath.Positions.Count;
+
+        // In case the entity spawns somewhere down the line, walk forward once at startup.
+        SnapForwardToSegmentContaining(target.Position, emitMarkers: false);
+
+        _firstTime = false;
+    }
+
+    public override void Stop()
+    {
+        PreviousIndex = 0;
+        NextIndex = 0;
+        Distance = 0f;
+    }
+
+    private bool _firstTime = true;
+
+    public override void Tick()
+    {
+        if (_firstTime) {
+            FirstTick();
+        }
+
+        if (_trainPath.Positions.Count < 2) return;
+
+        var target = _getTarget?.Invoke();
+        if (target == null || !target.Exists()) return;
+
+        var pos = target.Position;
+
+        // Advance through as many segments as necessary to catch up with the entity.
+        // Emit OnMarker for each marker we pass/land on.
+        SnapForwardToSegmentContaining(pos, emitMarkers: true);
+    }
+
+    // ---- internal mechanics -------------------------------------------------
+
+    private void SnapForwardToSegmentContaining(Vector3 worldPos, bool emitMarkers)
+    {
+        // Clamp to the last segment if we’re already at/after the end.
+        while (true)
         {
-            var v = Positions[i];
-            float dx = pos.X - v.X;
-            float dy = pos.Y - v.Y;
-            float dz = pos.Z - v.Z;
-            float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 < bestDist2)
+            if (NextIndex >= _trainPath.Positions.Count)
             {
-                bestDist2 = d2;
-                bestIdx = i;
+                // we are past the last point; pin to the last segment end
+                PreviousIndex = _trainPath.Positions.Count - 2;
+                NextIndex = _trainPath.Positions.Count - 1;
+                Distance = 1f - float.Epsilon; // "at end"
+                return;
             }
-        }
 
-        return bestIdx;
+            var a = AsV3(_trainPath.Positions[PreviousIndex]);
+            var b = AsV3(_trainPath.Positions[NextIndex]);
+
+            var seg = b - a;
+            float segLenSq = seg.LengthSquared();
+            if (segLenSq < 1e-6f)
+            {
+                // Degenerate segment (duplicate markers). Treat as instant pass.
+                if (emitMarkers) _onMarker(NextIndex);
+                PreviousIndex++;
+                NextIndex++;
+                Distance = 0f;
+                continue;
+            }
+
+            // Project entity onto the current segment
+            float t = Vector3.Dot(worldPos - a, seg) / segLenSq;
+
+            // If we're clearly before 'a' (can happen at Start()), stay on this segment.
+            if (t < 0f)
+            {
+                Distance = 0f;
+                // If we’re actually *on* marker 'a', let caller decide if that counts;
+                // we don't emit here to avoid double-emitting at 0 unless we crossed it.
+                return;
+            }
+
+            // If we’re at/after 'b', we have passed marker NextIndex: emit and advance.
+            // Also treat being within PointEpsilon of 'b' as a pass even if projection < 1.
+            var closest = a + seg * MathUtil.Clamp(t, 0f, 1f);
+            bool withinPoint = (closest - b).Length() <= PointEpsilon;
+
+            if (t >= 1f || withinPoint)
+            {
+                if (emitMarkers) _onMarker(NextIndex);
+                PreviousIndex++;
+                NextIndex++;
+                Distance = 0f; // will recompute on the next loop
+                continue;
+            }
+
+            // We are between a and b: lock in Distance in [0,1)
+            Distance = MathUtil.Clamp(t, 0f, 1f - float.Epsilon);
+            return;
+        }
+    }
+
+    private static Vector3 AsV3(in Vector4 v) => new Vector3(v.X, v.Y, v.Z);
+
+    private static class MathUtil
+    {
+        public static float Clamp(float v, float min, float max)
+            => v < min ? min : (v > max ? max : v);
     }
 }
