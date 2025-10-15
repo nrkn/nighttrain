@@ -73,6 +73,20 @@ public class ScenarioSystem : ModSubsystemBase
             Spawn(type, target);
         }
 
+        // Event-driven pickup collection: if a TrackPickup exists exactly on this mark, collect immediately
+        if (_active.TryGetValue(mark, out var activeHere) && activeHere.Type == ScenarioType.TrackPickup)
+        {
+            // collect and cleanup
+            var prop = activeHere.Entities.FirstOrDefault() as Prop;
+            if (prop != null && prop.Exists())
+            {
+                Notification.PostTicker("~g~You got the thing!", true);
+                try { prop.Delete(); } catch { }
+            }
+            activeHere.Entities.Clear();
+            _active.Remove(mark);
+        }
+
         CleanScenarios(mark);
     }
 
@@ -329,19 +343,7 @@ public class ScenarioSystem : ModSubsystemBase
             {
                 case ScenarioType.TrackPickup:
                     {
-                        var prop = scenario.Entities.FirstOrDefault() as Prop;
-                        if (prop != null && prop.Exists())
-                        {
-                            // collect if close
-                            if (player.Position.DistanceToSquared(prop.Position) <= PickupRadius * PickupRadius)
-                            {
-                                // “pickup” — delete and notify
-                                Notification.PostTicker("~g~You got the thing!", true);
-                                prop.Delete();
-                                scenario.Entities.Clear();
-                                _active.Remove(kv.Key);
-                            }
-                        }
+                        // No per-tick collision checks needed; handled in OnMarker when we pass the pickup mark
                         break;
                     }
 

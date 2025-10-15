@@ -92,6 +92,13 @@ public class TurretPlatformSystem : ModSubsystemBase
             var desired = engine.Position + _attachOffset;
             Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, _platform.Handle, desired.X, desired.Y, desired.Z, true, true, true);
             try { _platform.Heading = engine.Heading; } catch { }
+            // Match velocity to reduce lag/snap at high speed when physics resolves
+            try
+            {
+                var v = engine.Velocity;
+                Function.Call(Hash.SET_ENTITY_VELOCITY, _platform.Handle, v.X, v.Y, v.Z);
+            }
+            catch { }
         }
         else if (!_attached)
         {
@@ -269,7 +276,9 @@ public class TurretPlatformSystem : ModSubsystemBase
 
         // Visibility off and collision disabled
 
-        // we may be keeping in on if we can get a good train engine + turret combo that doesn't look weird
+        // it actually looks OK, at least when using the 'standard', the vehicle is mostly inside the train and the player/turret on top
+        // so we might be able to just attach a few small props that look appropriate (metal plates etc) over the sticking out bits
+        // and then it looks really cool having the player/turret on top of the train
         //Function.Call(Hash.SET_ENTITY_VISIBLE, v.Handle, false, false);
 
         Function.Call(Hash.SET_ENTITY_COLLISION, v.Handle, false, false);
@@ -284,7 +293,9 @@ public class TurretPlatformSystem : ModSubsystemBase
         try { v.IsEngineRunning = true; } catch { }
         Function.Call(Hash.SET_VEHICLE_ENGINE_ON, v.Handle, true, true, false);
 
-        // Also mute engine and stop lights for stealth - todo - these methods have changed, figure out what they are called now
+        // Also mute engine and stop lights for stealth
+        // todo - these methods have changed, figure out what they are called now
+        // but not that important as none of the vehicles we use have sirens or lights on by default
         //v.SirenActive = false;
         //v.LightsOn = false;
     }
