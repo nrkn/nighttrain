@@ -80,6 +80,7 @@
     <Compile Include="Systems\RecordPathSystem.cs" />
     <Compile Include="Systems\ScenarioSystem.cs" />
     <Compile Include="Systems\StartupSoundSystem.cs" />
+    <Compile Include="Systems\TurretPlatformSystem.cs" />
     <Compile Include="TrainPath.cs" />
     <Compile Include="Systems\TrainSystem.cs" />
   </ItemGroup>

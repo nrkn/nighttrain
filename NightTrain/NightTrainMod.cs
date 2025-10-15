@@ -23,8 +23,6 @@ public class NightTrainMod : Script
         Tick += OnTick;
         Interval = 0;
 
-        Init();
-
         Notification.PostTicker("~p~Night Train~s~ loaded (F5 to start, F6 to stop).", true);
     }
 
@@ -83,6 +81,7 @@ public class NightTrainMod : Script
         var train = new TrainSystem(_config.General);
         var progress = new PathProgressSystem(_trainPath, () => train.Engine, OnMarker);
         var progressHud = new ProgressHudSystem(_config.ProgressHud, progress);
+        var turret = new TurretPlatformSystem(() => train.Engine);
 
         scenario = new ScenarioSystem(_trainPath, () => _random);
 
@@ -92,7 +91,7 @@ public class NightTrainMod : Script
         _subsystems.Add(progress);
         _subsystems.Add(progressHud);
         _subsystems.Add(scenario);
-
+        _subsystems.Add(turret);
 
         if (_config.General.RecordPath)
         {
@@ -113,6 +112,8 @@ public class NightTrainMod : Script
 
     private void Start()
     {
+        Init();
+
         foreach (var sys in _subsystems)
         {
             sys.Start();

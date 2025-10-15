@@ -7,6 +7,53 @@ using GTA.UI;
 
 public class TrainSystem : ModSubsystemBase
 {
+    // --- Simple job system ----------------------------------------------------
+    private sealed class Job
+    {
+        public readonly int IntervalMs;
+        public readonly Action Action;
+        public bool Enabled = true;
+        public int LastRun;   // Game.GameTime when it last ran
+
+        public Job(int intervalMs, Action action, int startDelayMs = 0, bool runImmediately = false)
+        {
+            IntervalMs = Math.Max(1, intervalMs);
+            Action = action ?? throw new ArgumentNullException(nameof(action));
+
+            // If runImmediately, make it due on the next Tick.
+            // Else, schedule first run interval from now (+ optional startDelay).
+            var now = Game.GameTime;
+            LastRun = runImmediately ? now - IntervalMs : now - Math.Max(0, IntervalMs - startDelayMs);
+        }
+
+        public bool IsDue(int now) => Enabled && (now - LastRun) >= IntervalMs;
+
+        public void Run(int now)
+        {
+            try { Action(); }
+            catch (Exception ex)
+            {
+                // Keep the loop resilient: surface once, then keep going.
+                Notification.PostTicker($"~r~Job error: {ex.Message}", true);
+            }
+            finally
+            {
+                LastRun = now; // schedule next run from this moment
+            }
+        }
+    }
+
+    private readonly List<Job> _jobs = new List<Job>();
+
+    private Job AddJob(int intervalMs, Action action, int startDelayMs = 0, bool runImmediately = false)
+    {
+        var j = new Job(intervalMs, action, startDelayMs, runImmediately);
+        _jobs.Add(j);
+        return j;
+    }
+
+    // -------------------------------------------------------------------------
+
     private readonly List<Entity> _spawned = new List<Entity>();
     private Vector3 _startPosition;
     private readonly float _startHeading;
@@ -22,6 +69,13 @@ public class TrainSystem : ModSubsystemBase
         _startPosition = cfg.StartPosition;
         _startHeading = cfg.StartHeading;
         _startSpeed = cfg.StartSpeed;
+
+        // Reassert NO random trains every second forever.
+        // runImmediately=true so it’s applied on the first Tick too.
+        AddJob(1000, () => Function.Call(Hash.SET_RANDOM_TRAINS, false), runImmediately: true);
+
+        // Example: you can add other periodic jobs like health top-ups, etc.
+        // AddJob(2000, () => HardenTrainEntity(Engine));
     }
 
     public override void Start()
@@ -39,13 +93,36 @@ public class TrainSystem : ModSubsystemBase
 
         _spawned.Clear();
 
+        // Restore vanilla behaviour on shutdown
         Function.Call(Hash.SET_RANDOM_TRAINS, true);
+
+        // Optionally pause jobs (kept simple: disable all)
+        foreach (var j in _jobs) j.Enabled = false;
+    }
+
+    public override void Tick()
+    {
+        // Run any due jobs; budget-friendly: one pass, no while-loops.
+        int now = Game.GameTime;
+
+        // Optional: cap how many jobs we execute per frame if you add many.
+        // int executed = 0, maxPerTick = 8;
+
+        for (int i = 0; i < _jobs.Count; i++)
+        {
+            var j = _jobs[i];
+            if (j.IsDue(now))
+            {
+                j.Run(now);
+
+                // if (++executed >= maxPerTick) break;
+            }
+        }
     }
 
     private void InitPlayer()
     {
         var player = Game.Player.Character;
-
         player.Position = _startPosition;
         player.Heading = _startHeading;
     }
@@ -91,9 +168,10 @@ public class TrainSystem : ModSubsystemBase
     {
         // required before SET_RANDOM_TRAINS
         Function.Call(Hash.SWITCH_TRAIN_TRACK, 0, true);
-        Function.Call(Hash.SET_TRAIN_TRACK_SPAWN_FREQUENCY, 0, 120000);
+        Function.Call(Hash.SET_TRAIN_TRACK_SPAWN_FREQUENCY, 0, 0);
 
         Function.Call(Hash.SET_RANDOM_TRAINS, false);
+        Function.Call(Hash.DELETE_ALL_TRAINS);
 
         LoadTrainModelsOrThrow();
         _engineHandle = Function.Call<int>(Hash.CREATE_MISSION_TRAIN, 0, _startPosition.X, _startPosition.Y, _startPosition.Z, true, true, true);
