@@ -1,306 +1,155 @@
 using System;
-using System.Linq;
-using System.Collections.Generic;
 using GTA;
 using GTA.Math;
 using GTA.Native;
-using GTA.UI;
 
-// Spawns an invisible weaponized vehicle, attaches it to the train engine, and seats the player
-// in a turret seat if available (fallback: passenger for drive-by). This gives reliable aiming/shooting
-// while the train moves, without clearance issues.
+// Minimal: spawns a configurable weaponized vehicle (default "technical"),
+// attaches to the train engine, seats player in a configured seat (default turret seat = 1).
 public class TurretPlatformSystem : ModSubsystemBase
 {
     private readonly Func<Entity> _getEngine;
-
-    // Candidate vehicles that support turrets/gunner seats. We'll try in order.
-    private static readonly string[] TurretVehicleModels = new[]
-    {
-        // Common GTA V weaponized platforms (feel free to tweak order)
-
-        // pretty good - has turret, turns correctly, player is vulnerable, looks good
-        "technical",    // Technical
-        "technical2",   // Technical Aqua/variant
-        "technical3",   // Technical Custom
-        "halftrack",    // Half-Track
-
-        // eh, they're ok - player is getting set into wrong seat though
-        "menacer",      // Menacer (roof turret)
-        "barrage",      // Barrage (mounted guns)
-        "caracara",     // Caracara (turret bed)
-        "caracara2",    // Caracara 4x4
-
-        // really good but overpowered - so easy lol - maybe use sparingly, as temp powerups?
-        // we could overcome this partially by overriding the explosive rounds to use a normal weapon
-        // however - the player is not vulnerable while inside the tank and we currently use player death as fail state
-        "rhino",        // Rhino Tank 
-        "khanjali",    // Khanjali Tank
-
-        // cool but target crosshairs are restricted to a range that only allows shooting out the left of the vehicle
-        "apc",          // APC (driver cannon; different feel)
-
-
-        
-        // player is placed in vehicle seat - so in vehicle shooting - limited range, can't shoot on some angles - not very good
-        "insurgent2",   // Insurgent Pick-Up
-        "insurgent3",   // Insurgent Pick-Up Custom
-    };
+    private readonly NightTrainConfig _config;
 
     private Vehicle _platform;
     private Ped _player;
-    private bool _seated;
     private bool _attached;
-    private bool _followOnly; // tanks follow engine instead of attaching to preserve turret rotation
+    private bool _seated;
 
-    // Attachment tuning (relative to engine origin)
-    private readonly Vector3 _attachOffset = new Vector3(0f, 0f, 2.0f); // a bit above cab
-    private readonly Vector3 _attachRot = Vector3.Zero; // yaw/pitch/roll degrees
-
-    public TurretPlatformSystem(Func<Entity> getEngine)
+    public TurretPlatformSystem(Func<Entity> getEngine, NightTrainConfig config)
     {
         _getEngine = getEngine;
+        _config = config;
     }
 
     public override void Start()
     {
         _player = Game.Player.Character;
-        TryCreateAndAttachPlatform();
-    }
 
-    public override void Stop()
-    {
-        SafeCleanup();
+        if (!_config.Debug.EnableTurretPlatform) return;
+
+        EnsurePlatform();
+        TryAttach();
+        TrySeatTurret();
     }
 
     public override void Tick()
     {
-        // Keep platform healthy and reattach if needed (engine can respawn across restarts)
+        if (!_config.Debug.EnableTurretPlatform) return;
+
         var engine = _getEngine?.Invoke();
         if (engine == null || !engine.Exists()) return;
 
+        // If the platform got deleted, recreate and reattach.
         if (_platform == null || !_platform.Exists())
         {
-            TryCreateAndAttachPlatform();
-            return;
+            EnsurePlatform();
+            _attached = false;
+            _seated = false;
         }
 
-        // Prefer follow-only for all supported platforms to avoid attach yaw constraints
-        _followOnly = true;
+        if (!_attached) TryAttach();
+        if (!_seated) TrySeatTurret();
 
-        if (_followOnly)
-        {
-            var desired = engine.Position + _attachOffset;
-            Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, _platform.Handle, desired.X, desired.Y, desired.Z, true, true, true);
-            try { _platform.Heading = engine.Heading; } catch { }
-            // Match velocity to reduce lag/snap at high speed when physics resolves
-            try
-            {
-                var v = engine.Velocity;
-                Function.Call(Hash.SET_ENTITY_VELOCITY, _platform.Handle, v.X, v.Y, v.Z);
-            }
-            catch { }
-        }
-        else if (!_attached)
-        {
-            AttachToEngine(engine);
-        }
-
-        if (!_seated)
-        {
-            SeatPlayerPreferTurret();
-        }
-
-        // Keep it invisible and intangible every tick (belt and braces)
-        KeepInvisibleIntangible(_platform);
+        PlatformTick(_platform);
     }
 
-    private void TryCreateAndAttachPlatform()
+    private void EnsurePlatform()
     {
         var engine = _getEngine?.Invoke();
         if (engine == null || !engine.Exists()) return;
 
-        // Pick the first available model we can load
-        Model picked = null;
-        foreach (var name in TurretVehicleModels)
+        var model = new Model(_config.Debug.TurretModel);
+        model.Request(2000);
+        if (!model.IsLoaded) return;
+
+        var pos = engine.Position + new Vector3(
+            _config.Debug.AttachOffsetX,
+            _config.Debug.AttachOffsetY,
+            _config.Debug.AttachOffsetZ
+        );
+
+        _platform = World.CreateVehicle(model, pos, engine.Heading);
+        model.MarkAsNoLongerNeeded();
+
+        if (_platform == null || !_platform.Exists()) return;
+
+        // Fix: align heading to engine on spawn to avoid awkward angle
+        if (_config.Debug.SetHeadingOnSpawn)
         {
-            var m = new Model(name);
-            if (!m.IsInCdImage) { m.MarkAsNoLongerNeeded(); continue; }
-            m.Request(2000);
-            if (m.IsLoaded) { picked = m; break; }
-            m.MarkAsNoLongerNeeded();
+            try { _platform.Heading = engine.Heading; } catch { }
         }
 
-        if (picked == null)
-        {
-            Notification.PostTicker("~y~Turret platform: no weaponized model available, using fallback.", true);
-            picked = new Model(VehicleHash.Blazer); // simple small vehicle
-            picked.Request(1500);
-        }
-
-        var pos = engine.Position + _attachOffset;
-        _platform = World.CreateVehicle(picked, pos, engine.Heading);
-        picked.MarkAsNoLongerNeeded();
-
-        if (_platform == null || !_platform.Exists())
-        {
-            Notification.PostTicker("~r~Failed to create turret platform vehicle.", true);
-            return;
-        }
-
-        // Mission entity and persistence to avoid random cleanup
         Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _platform.Handle, true, true);
         _platform.IsPersistent = true;
 
-        // Invisible + intangible
-        KeepInvisibleIntangible(_platform);
-
-        // Follow-only to keep heading/rotation natural and avoid sideways attach
-        _followOnly = true;
-        try { _platform.Heading = engine.Heading; } catch { }
-        // No attach in follow-only mode
-        SeatPlayerPreferTurret();
-
-        Notification.PostTicker("Gun platform ready.", true);
+        PlatformTick(_platform);
     }
 
-    private void AttachToEngine(Entity engine)
+    private void TryAttach()
     {
-        if (_platform == null || !_platform.Exists()) return;
+        var engine = _getEngine?.Invoke();
         if (engine == null || !engine.Exists()) return;
+        if (_platform == null || !_platform.Exists()) return;
 
-        // Attach flags tuned to follow rotation and position, no collision transfer
-        // ATTACH_ENTITY_TO_ENTITY(entity, target, boneIndex, x, y, z, pitch, roll, yaw, p9, useSoftPinning, collision, isPed, vertexIndex, fixedRot, p15)
+        // ATTACH_ENTITY_TO_ENTITY(entity, target, boneIndex, x,y,z, pitch,roll,yaw, p9, useSoftPin, collision, isPed, bone, fixedRot, p15)
         Function.Call(Hash.ATTACH_ENTITY_TO_ENTITY,
             _platform.Handle,
             engine.Handle,
             0,
-            _attachOffset.X, _attachOffset.Y, _attachOffset.Z,
-            _attachRot.X, _attachRot.Y, _attachRot.Z,
-            false, // p9
-            true,  // useSoftPinning
-            false, // collision (false: don't collide)
-            false, // isPed
-            2,     // vertexIndex / bone (0/2 are common defaults)
-            false, // fixedRot: allow local rotation
-            true   // p15
+            _config.Debug.AttachOffsetX,
+            _config.Debug.AttachOffsetY,
+            _config.Debug.AttachOffsetZ,
+            _config.Debug.AttachRotPitch,
+            _config.Debug.AttachRotRoll,
+            _config.Debug.AttachRotYaw,
+            false,                                    // p9
+            _config.Debug.UseSoftPinning,             // useSoftPinning
+            !_config.Debug.DisableCollisionWhileAttached ? true : false, // collision flag
+            true,                                    // isPed
+            _config.Debug.AttachBoneIndex,            // bone index (0/2 common)
+            _config.Debug.FixedRotation,              // fixedRot
+            true                                      // p15
         );
 
         _attached = true;
     }
 
-    private void SeatPlayerPreferTurret()
+    private void TrySeatTurret()
     {
         if (_platform == null || !_platform.Exists()) return;
         if (_player == null || !_player.Exists()) return;
 
-        try
-        {
-            // Try some likely turret/gunner seat indices first.
-            // If none succeed, fallback to front passenger for drive-by shooting.
-            int[] preferredSeats = new[] { 1, 2, 3, 4 };
+        // Direct seat assignment from config (default 1 for Technical turret)
+        Function.Call(Hash.SET_PED_INTO_VEHICLE, _player.Handle, _platform.Handle, _config.Debug.TurretSeatIndex);
+        Script.Yield();
 
-            // Ensure vehicle is actually usable for weapons & UI
-            try { _platform.IsUndriveable = false; } catch { }
-            try { _platform.IsEngineRunning = true; } catch { }
-            Function.Call(Hash.SET_VEHICLE_ENGINE_ON, _platform.Handle, true, true, false);
-
-            bool seated = false;
-            // Tanks (rhino/khanjali) use the driver seat for the cannon.
-            int modelHash = _platform.Model.Hash;
-            int rhinoHash = new Model("rhino").Hash;
-            int khanjaliHash = new Model("khanjali").Hash;
-            bool tankDriverWeapon = (modelHash == rhinoHash) || (modelHash == khanjaliHash);
-
-            if (tankDriverWeapon)
-            {
-                if (Function.Call<bool>(Hash.IS_VEHICLE_SEAT_FREE, _platform.Handle, -1))
-                {
-                    Function.Call(Hash.SET_PED_INTO_VEHICLE, _player.Handle, _platform.Handle, -1);
-                    Script.Yield();
-                    if (_player.IsInVehicle(_platform)) { seated = true; }
-                }
-            }
-            else
-            {
-                foreach (var seatIndex in preferredSeats)
-                {
-                    if (Function.Call<bool>(Hash.IS_VEHICLE_SEAT_FREE, _platform.Handle, seatIndex))
-                    {
-                        Function.Call(Hash.SET_PED_INTO_VEHICLE, _player.Handle, _platform.Handle, seatIndex);
-                        Script.Yield();
-                        if (_player.IsInVehicle(_platform)) { seated = true; break; }
-                    }
-                }
-            }
-
-            if (!seated)
-            {
-                // Fallback: passenger seat (0)
-                if (Function.Call<bool>(Hash.IS_VEHICLE_SEAT_FREE, _platform.Handle, 0))
-                {
-                    Function.Call(Hash.SET_PED_INTO_VEHICLE, _player.Handle, _platform.Handle, 0);
-                }
-                else
-                {
-                    // Last resort: driver seat (-1)
-                    Function.Call(Hash.SET_PED_INTO_VEHICLE, _player.Handle, _platform.Handle, -1);
-                }
-
-                // Allow drive-by if we aren't in a turret
-                Function.Call(Hash.SET_ENABLE_HANDCUFFS, _player.Handle, false);
-                Function.Call(Hash.SET_PED_CAN_SWITCH_WEAPON, _player.Handle, true);
-                Function.Call(Hash.SET_CAN_ATTACK_FRIENDLY, _player.Handle, false, false);
-            }
-
-            // Extra QoL: prevent getting yanked, keep tasks simple
-            _player.BlockPermanentEvents = true;
-            _player.KnockOffVehicleType = KnockOffVehicleType.Never;
-            _player.CanBeDraggedOutOfVehicle = false;
-            _player.IsOnlyDamagedByPlayer = false;
-
-            _seated = _player.IsInVehicle(_platform);
-
-            // Radio: enable control (note some vehicles like tanks simply have no radio)
-            try { Function.Call(Hash.SET_VEHICLE_RADIO_ENABLED, _platform.Handle, true); } catch { }
-            try { Function.Call(Hash.SET_USER_RADIO_CONTROL_ENABLED, true); } catch { }
-        }
-        catch (Exception ex)
-        {
-            Notification.PostTicker($"~y~Gun platform seat failed: {ex.Message}", true);
-        }
+        _seated = _player.IsInVehicle(_platform);
     }
 
-    private static void KeepInvisibleIntangible(Vehicle v)
+    private void PlatformTick(Vehicle v)
     {
         if (v == null || !v.Exists()) return;
 
-        // Visibility off and collision disabled
+        // If you want the explicit control, this mirrors SET_ENTITY_COLLISION(entity, toggle, keepPhysics)
+        if (_config.Debug.UseSetEntityCollision)
+        {
+            Function.Call(Hash.SET_ENTITY_COLLISION, v.Handle,
+                _config.Debug.SetEntityCollision_Toggle,
+                _config.Debug.SetEntityCollision_KeepPhysics);
+        }
+        else
+        {
+            // Legacy convenience switch: off means toggle=false, keepPhysics=false
+            if (_config.Debug.DisableCollisionWhileAttached)
+            {
+                Function.Call(Hash.SET_ENTITY_COLLISION, v.Handle, false, false);
+            }
+        }
 
-        // it actually looks OK, at least when using the 'standard', the vehicle is mostly inside the train and the player/turret on top
-        // so we might be able to just attach a few small props that look appropriate (metal plates etc) over the sticking out bits
-        // and then it looks really cool having the player/turret on top of the train
-        //Function.Call(Hash.SET_ENTITY_VISIBLE, v.Handle, false, false);
-
-        Function.Call(Hash.SET_ENTITY_COLLISION, v.Handle, false, false);
-
-        v.IsInvincible = true;
-        v.IsPositionFrozen = false; // let attachment handle transform
-        v.CanBeVisiblyDamaged = false;
         v.IsPersistent = true;
-
-        // Keep it driveable so turret/driver weapons and UI work
-        try { v.IsUndriveable = false; } catch { }
-        try { v.IsEngineRunning = true; } catch { }
-        Function.Call(Hash.SET_VEHICLE_ENGINE_ON, v.Handle, true, true, false);
-
-        // Also mute engine and stop lights for stealth
-        // todo - these methods have changed, figure out what they are called now
-        // but not that important as none of the vehicles we use have sirens or lights on by default
-        //v.SirenActive = false;
-        //v.LightsOn = false;
     }
 
-    private void SafeCleanup()
+    public override void Stop()
     {
         _attached = false;
         _seated = false;
@@ -311,12 +160,11 @@ public class TurretPlatformSystem : ModSubsystemBase
             {
                 if (_platform.Exists())
                 {
-                    // Detach first to avoid deleting attached entity crashes
                     Function.Call(Hash.DETACH_ENTITY, _platform.Handle, true, true);
                     _platform.Delete();
                 }
             }
-            catch { /* ignore */ }
+            catch { }
             finally { _platform = null; }
         }
     }

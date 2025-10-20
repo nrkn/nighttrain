@@ -69,7 +69,7 @@ public class NightTrainMod : Script
     }
 
     private void Init()
-    {
+    {        
         _subsystems = new List<IModSubsystem>();
         _config = new NightTrainConfig();
         _random = new Random(_config.General.Seed);
@@ -79,9 +79,13 @@ public class NightTrainMod : Script
         var startupSound = new StartupSoundSystem();
         var death = new DeathSystem(_config.General, Restart);
         var train = new TrainSystem(_config.General);
-        var progress = new PathProgressSystem(_trainPath, () => train.Engine, OnMarker);
+
+        Func<Entity> getEngine = () => train.Engine;
+
+        var progress = new PathProgressSystem(_trainPath, getEngine, OnMarker);
         var progressHud = new ProgressHudSystem(_config.ProgressHud, progress);
-        var turret = new TurretPlatformSystem(() => train.Engine);
+        var turret = new TurretPlatformSystem(getEngine, _config);
+        //var gunner = new InvisibleGunnerSystem(getEngine);
 
         scenario = new ScenarioSystem(_trainPath, () => _random);
 
@@ -92,6 +96,7 @@ public class NightTrainMod : Script
         _subsystems.Add(progressHud);
         _subsystems.Add(scenario);
         _subsystems.Add(turret);
+        //_subsystems.Add(gunner);
 
         if (_config.General.RecordPath)
         {

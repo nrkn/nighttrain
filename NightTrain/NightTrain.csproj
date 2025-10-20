@@ -65,11 +65,13 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Config\DebugConfig.cs" />
     <Compile Include="Ext.cs" />
     <Compile Include="Systems\DeathSystem.cs" />
     <Compile Include="Systems\DebugPathViewerSystem.cs" />
     <Compile Include="Config\GeneralConfig.cs" />
     <Compile Include="Systems\IModSubsystem.cs" />
+    <Compile Include="Systems\InvisibleGunnerSystem.cs" />
     <Compile Include="Systems\ModSubsystemBase.cs" />
     <Compile Include="Config\NightTrainConfig.cs" />
     <Compile Include="NightTrainMod.cs" />
