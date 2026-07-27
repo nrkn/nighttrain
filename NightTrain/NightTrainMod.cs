@@ -84,8 +84,6 @@ public class NightTrainMod : Script
 
         var progress = new PathProgressSystem(_trainPath, getEngine, OnMarker);
         var progressHud = new ProgressHudSystem(_config.ProgressHud, progress);
-        var turret = new TurretPlatformSystem(getEngine, _config);
-        //var gunner = new InvisibleGunnerSystem(getEngine);
 
         scenario = new ScenarioSystem(_trainPath, () => _random);
 
@@ -95,8 +93,6 @@ public class NightTrainMod : Script
         _subsystems.Add(progress);
         _subsystems.Add(progressHud);
         _subsystems.Add(scenario);
-        _subsystems.Add(turret);
-        //_subsystems.Add(gunner);
 
         if (_config.General.RecordPath)
         {

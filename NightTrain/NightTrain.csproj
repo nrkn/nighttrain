@@ -65,13 +65,11 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Config\DebugConfig.cs" />
     <Compile Include="Ext.cs" />
     <Compile Include="Systems\DeathSystem.cs" />
     <Compile Include="Systems\DebugPathViewerSystem.cs" />
     <Compile Include="Config\GeneralConfig.cs" />
     <Compile Include="Systems\IModSubsystem.cs" />
-    <Compile Include="Systems\InvisibleGunnerSystem.cs" />
     <Compile Include="Systems\ModSubsystemBase.cs" />
     <Compile Include="Config\NightTrainConfig.cs" />
     <Compile Include="NightTrainMod.cs" />
@@ -82,7 +80,6 @@
     <Compile Include="Systems\RecordPathSystem.cs" />
     <Compile Include="Systems\ScenarioSystem.cs" />
     <Compile Include="Systems\StartupSoundSystem.cs" />
-    <Compile Include="Systems\TurretPlatformSystem.cs" />
     <Compile Include="TrainPath.cs" />
     <Compile Include="Systems\TrainSystem.cs" />
   </ItemGroup>
